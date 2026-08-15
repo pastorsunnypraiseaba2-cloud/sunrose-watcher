@@ -1,0 +1,28 @@
+# Copy this file's contents into Vercel Project Settings -> Environment Variables.
+# Never commit a real .env file with actual values to git.
+
+# Your Deriv API token (read-only market data doesn't strictly require one, but
+# the app's own derivFetchQuote/derivFetchCandles calls are unauthenticated reads --
+# this project follows the same pattern and does NOT send a token to Deriv at all.
+# DERIV_APP_ID below is the only Deriv-side identifier used.)
+DERIV_APP_ID=1089
+
+# From your EXISTING Telegram bot -- see README.md step 1 for where to find
+# the token if you don't have it saved (BotFather -> /mybots -> API Token)
+TELEGRAM_BOT_TOKEN=123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# The chat ID your bot should message -- see README.md step 1
+TELEGRAM_CHAT_ID=123456789
+
+# From upstash.com after creating a free Redis database -- see README.md step 2
+UPSTASH_REDIS_REST_URL=https://xxxxx.upstash.io
+UPSTASH_REDIS_REST_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# A password you invent yourself -- put the SAME value in your cron-job.org URL
+# (as ?secret=...) and here. Keeps random visitors from triggering this endpoint.
+WATCH_SECRET=choose-a-long-random-string-here
+
+# How many instruments to check per invocation. Lower = safer under Vercel's
+# 10-second Hobby ceiling and gentler on Deriv, but slower full-list coverage.
+# 5 symbols x 2 Deriv calls each is a reasonable starting point.
+WATCH_BATCH_SIZE=5
