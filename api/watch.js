@@ -25,7 +25,7 @@
 const { fmt } = require('../lib/cpr-engine');
 const { buildState } = require('../lib/build-state');
 const { evaluateContinuationStrategy, evaluateReversalStrategy } = require('../lib/brain');
-const { getCursor, setCursor, getLastAlignment, setLastAlignment, getLastVerdict, setLastVerdict } = require('../lib/state');
+const { getCursor, setCursor, getSetAlignment, getSetVerdict } = require('../lib/state');
 const { sendTelegramAlert } = require('../lib/telegram');
 const WATCHLIST = require('../lib/watchlist');
 
@@ -84,8 +84,15 @@ module.exports = async function handler(req, res) {
     summary.push(entry);
 
     // -- Phase 1: CPR alignment heads-up --
+    // getSetAlignment reads the old value AND writes the new one in a single
+    // atomic Redis call, so two overlapping invocations can't both see the
+    // stale value and both alert. Only touch the stored key when this tick
+    // actually produced a real alignment -- NO_DATA never triggers an alert
+    // anyway (isFullAlignment is false), so there's nothing to gain by
+    // overwriting a real prior alignment with "no data this tick," and doing
+    // so would break the transition comparison on the next good tick.
     const isFullAlignment = alignment === 'FULL_BULL' || alignment === 'FULL_BEAR';
-    const previousAlignment = await getLastAlignment(symLabel);
+    const previousAlignment = alignment !== 'NO_DATA' ? await getSetAlignment(symLabel, alignment) : null;
     if (isFullAlignment && previousAlignment !== alignment) {
       const direction = alignment === 'FULL_BULL' ? 'BULLISH' : 'BEARISH';
       const note = bias.dailyNote ? '\n' + bias.dailyNote : '';
@@ -97,17 +104,17 @@ module.exports = async function handler(req, res) {
         );
       } catch (e) { entry.alignmentTelegramError = e.message; }
     }
-    if (alignment !== 'NO_DATA') await setLastAlignment(symLabel, alignment);
 
     // -- Phase 2: full verdicts, one dedupe key per (symbol, mode) --
+    // Same atomic read-and-set fix -- this is the one that caused the
+    // duplicate ADA/USD TRADE READY alert under the old two-step approach.
     for (const [mode, result] of [['continuation', continuation], ['reversal', reversal]]) {
-      const previousVerdict = await getLastVerdict(symLabel, mode);
+      const previousVerdict = await getSetVerdict(symLabel, mode, result.verdict);
       if (result.verdict === 'TRADE READY' && previousVerdict !== 'TRADE READY') {
         try {
           await sendTelegramAlert(formatVerdictAlert(symLabel, price, result));
         } catch (e) { entry[mode + 'TelegramError'] = e.message; }
       }
-      await setLastVerdict(symLabel, mode, result.verdict);
     }
   }
 
