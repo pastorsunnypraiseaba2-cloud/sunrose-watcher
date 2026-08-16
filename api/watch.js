@@ -120,7 +120,12 @@ module.exports = async function handler(req, res) {
         // picks this up and sends a follow-up Telegram message with the
         // hedge-fund-style explanation once it's done.
         try {
-          await pushPendingVision({ symbol: symLabel, mode: mode, price: price, dailyCandlesForChart: dailyCandlesForChart, queuedAt: Date.now() });
+          await pushPendingVision({
+            symbol: symLabel, mode: mode, price: price, dailyCandlesForChart: dailyCandlesForChart,
+            direction: result.direction, stopPrice: result.stopPrice,
+            targetPrice: result.target ? result.target.price : null,
+            queuedAt: Date.now()
+          });
         } catch (e) { entry[mode + 'VisionQueueError'] = e.message; }
       }
     }
