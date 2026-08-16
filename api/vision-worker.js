@@ -11,6 +11,7 @@
 
 const { fmt } = require('../lib/cpr-engine');
 const { popPendingVision, isPositionOpen, markPositionOpen } = require('../lib/state');
+const { fetchAuxTimeframeCandles } = require('../lib/build-state');
 const { fetchChartImageBase64 } = require('../lib/chart-image');
 const { callChartVision } = require('../lib/chart-vision');
 const { sendTelegramAlert, sendTelegramPhoto } = require('../lib/telegram');
@@ -28,7 +29,7 @@ function formatVisionAlert(symbol, mode, mathPrice, v) {
     'Direction: ' + (v.direction || '--') + '   |   Confidence: ' + (v.confidence != null ? v.confidence + '%' : '--') + '\n' +
     'Entry zone (AI read): ' + entryLine + '\n\n' +
     (v.institutionalExplanation || 'No explanation returned.') + '\n\n' +
-    'This is Claude reading an auto-generated Daily chart -- a single-timeframe check, less thorough than manually running Chart Vision in the app with your full multi-timeframe screenshot set. Cross-check before acting.'
+    'This is Claude reading four auto-generated charts (Daily/4H/1H/15M) -- lighter than manually running Chart Vision in the app with your full hand-picked screenshot set. Cross-check before acting.'
   );
 }
 
@@ -59,12 +60,35 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const image = await fetchChartImageBase64(pending.dailyCandlesForChart, pending.symbol);
-    const visionResult = await callChartVision(pending.symbol, pending.mode, image.b64, image.mediaType);
+    // Build all four charts: Daily (already fetched by watch.js, passed through
+    // the queue) plus 4H/1H/15M (fetched fresh here, since this is the slow,
+    // rare path -- a few extra Deriv calls per confirmation is a non-issue).
+    const [fourHour, oneHour, fifteenMin] = await Promise.all([
+      fetchAuxTimeframeCandles(pending.symbol, 14400, 60),
+      fetchAuxTimeframeCandles(pending.symbol, 3600, 60),
+      fetchAuxTimeframeCandles(pending.symbol, 900, 60)
+    ]);
+    const [dailyImg, fourHourImg, oneHourImg, fifteenMinImg] = await Promise.all([
+      fetchChartImageBase64(pending.dailyCandlesForChart, pending.symbol, 'Daily'),
+      fetchChartImageBase64(fourHour, pending.symbol, '4H'),
+      fetchChartImageBase64(oneHour, pending.symbol, '1H'),
+      fetchChartImageBase64(fifteenMin, pending.symbol, '15M')
+    ]);
+    const images = [dailyImg, fourHourImg, oneHourImg, fifteenMinImg];
+
+    const visionResult = await callChartVision(pending.symbol, pending.mode, images);
     try {
-      // Send the actual chart Claude analyzed first, so the text verdict that
-      // follows has visual context right above it in the chat.
-      await sendTelegramPhoto(image.b64, image.mediaType, pending.symbol + ' -- auto-generated Daily chart (' + pending.mode + ')');
+      // Send all four charts Claude analyzed, so the text verdict that follows
+      // has the same visual context you'd see if you'd taken the screenshots
+      // yourself. Sent in parallel to save time -- this function now does
+      // meaningfully more work (4 chart fetches + a 4-image vision call + 4
+      // photo uploads) than the original single-Daily version, and is closer
+      // to Vercel's 10-second Hobby-plan limit than before. If you start
+      // seeing this worker fail/timeout, that limit is the likely reason --
+      // worth watching the History on cron-job.org after this change.
+      await Promise.all(images.map(function (img) {
+        return sendTelegramPhoto(img.b64, img.mediaType, pending.symbol + ' -- ' + img.tfLabel + ' (' + pending.mode + ')');
+      }));
       await sendTelegramAlert(formatVisionAlert(pending.symbol, pending.mode, pending.price, visionResult));
     } catch (telegramErr) {
       res.status(200).json({ processed: true, symbol: pending.symbol, mode: pending.mode, visionResult: visionResult, telegramError: telegramErr.message });
