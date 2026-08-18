@@ -6,13 +6,13 @@
 // using the full 10-step institutional checklist, for both Continuation and
 // Reversal.
 //
-// COVERAGE MATH: Vercel's 10-second limit means one tick can't check all 21
-// instruments -- this checks ONE per tick, rotating through the list via a
-// Redis-backed cursor (same pattern as the original math watcher's batching,
-// just a batch size of 1 instead of 5, since Vision is much heavier per
-// symbol than plain arithmetic). At one per 2-minute tick, a full pass through
-// all 21 instruments takes about 42 minutes -- "every 2 minutes" is how often
-// this SCANNER runs, not how often any single instrument gets rechecked.
+// COVERAGE MATH: Vercel's 10-second limit means one tick can't check even one
+// full symbol (both modes) reliably -- checking both Continuation AND
+// Reversal in a single run timed out in testing. This checks ONE (symbol,
+// mode) pair per tick, rotating through 21 symbols x 2 modes = 42 units via a
+// Redis-backed cursor. At one per 2-minute tick, a full pass through
+// everything takes about 84 minutes -- "every 2 minutes" is how often this
+// SCANNER runs, not how often any single instrument+mode gets rechecked.
 //
 // NOT wired to auto-trade. Auto-trading required the math engine AND Vision
 // to independently agree; since the math-gated confirmation flow was removed,
@@ -36,6 +36,17 @@ const FOREX_AND_GOLD = [
   'EUR/CHF', 'GBP/CHF', 'CHF/JPY', 'AUD/CAD', 'CAD/JPY', 'NZD/JPY', 'AUD/NZD'
 ];
 
+// Flatten to (symbol, mode) pairs -- 21 symbols x 2 modes = 42 units. Each
+// tick processes exactly ONE unit: one symbol, ONE mode, ONE vision call.
+// Checking both modes in a single invocation was the original design here and
+// it timed out at 30s -- the version that worked reliably (the old
+// vision-worker.js) only ever did one mode per run, so this matches that.
+const SCAN_UNITS = [];
+FOREX_AND_GOLD.forEach(function (sym) {
+  SCAN_UNITS.push({ symbol: sym, mode: 'continuation' });
+  SCAN_UNITS.push({ symbol: sym, mode: 'reversal' });
+});
+
 function formatScanAlert(symbol, mode, v) {
   const scoreLine = v.scores ? (v.scores.total + '/60 -- ' + v.scoreTier) : (v.scoreTier || 'unscored');
   const entryLine = v.entryZone && v.entryZone.low != null ? (fmt(v.entryZone.low) + '--' + fmt(v.entryZone.high)) : '--';
@@ -58,9 +69,10 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const cursor = await getVisionScanCursor(FOREX_AND_GOLD.length);
-  const symbol = FOREX_AND_GOLD[cursor];
-  const nextCursor = (cursor + 1) % FOREX_AND_GOLD.length;
+  const cursor = await getVisionScanCursor(SCAN_UNITS.length);
+  const unit = SCAN_UNITS[cursor];
+  const { symbol, mode } = unit;
+  const nextCursor = (cursor + 1) % SCAN_UNITS.length;
   await setVisionScanCursor(nextCursor);
 
   try {
@@ -78,22 +90,19 @@ module.exports = async function handler(req, res) {
     ]);
     const images = [dailyImg, fourHourImg, oneHourImg, fifteenMinImg];
 
-    const results = {};
-    for (const mode of ['continuation', 'reversal']) {
-      const visionResult = await callChartVision(symbol, mode, images);
-      const previousVerdict = await getSetSoloVerdict(symbol, mode, visionResult.verdict);
-      results[mode] = { verdict: visionResult.verdict, score: visionResult.scores ? visionResult.scores.total : null };
+    const visionResult = await callChartVision(symbol, mode, images);
+    const previousVerdict = await getSetSoloVerdict(symbol, mode, visionResult.verdict);
+    const result = { verdict: visionResult.verdict, score: visionResult.scores ? visionResult.scores.total : null };
 
-      if (visionResult.verdict === 'TRADE READY' && previousVerdict !== 'TRADE READY') {
-        await Promise.all(images.map(function (img) {
-          return sendTelegramPhoto(img.b64, img.mediaType, symbol + ' -- ' + img.tfLabel + ' (' + mode + ')');
-        }));
-        await sendTelegramAlert(formatScanAlert(symbol, mode, visionResult));
-      }
+    if (visionResult.verdict === 'TRADE READY' && previousVerdict !== 'TRADE READY') {
+      await Promise.all(images.map(function (img) {
+        return sendTelegramPhoto(img.b64, img.mediaType, symbol + ' -- ' + img.tfLabel + ' (' + mode + ')');
+      }));
+      await sendTelegramAlert(formatScanAlert(symbol, mode, visionResult));
     }
 
-    res.status(200).json({ processed: true, symbol: symbol, cursor: cursor, nextCursor: nextCursor, results: results });
+    res.status(200).json({ processed: true, symbol: symbol, mode: mode, cursor: cursor, nextCursor: nextCursor, result: result });
   } catch (e) {
-    res.status(200).json({ processed: false, symbol: symbol, cursor: cursor, error: e.message });
+    res.status(200).json({ processed: false, symbol: symbol, mode: mode, cursor: cursor, error: e.message });
   }
 };
