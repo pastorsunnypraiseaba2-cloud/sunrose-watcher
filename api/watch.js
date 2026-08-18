@@ -25,7 +25,7 @@
 const { fmt } = require('../lib/cpr-engine');
 const { buildState } = require('../lib/build-state');
 const { evaluateContinuationStrategy, evaluateReversalStrategy } = require('../lib/brain');
-const { getCursor, setCursor, getSetAlignment, getSetVerdict, pushPendingVision } = require('../lib/state');
+const { getCursor, setCursor, getSetAlignment, getSetVerdict } = require('../lib/state');
 const { sendTelegramAlert } = require('../lib/telegram');
 const WATCHLIST = require('../lib/watchlist');
 
@@ -78,7 +78,7 @@ module.exports = async function handler(req, res) {
       continue;
     }
 
-    const { price, bias, continuation, reversal, dailyCandlesForChart } = r.value;
+    const { price, bias, continuation, reversal } = r.value;
     const alignment = bias.alignment;
     const entry = { symbol: symLabel, ok: true, alignment: alignment, price: price, continuation: continuation.verdict, reversal: reversal.verdict };
     summary.push(entry);
@@ -114,19 +114,6 @@ module.exports = async function handler(req, res) {
         try {
           await sendTelegramAlert(formatVerdictAlert(symLabel, price, result));
         } catch (e) { entry[mode + 'TelegramError'] = e.message; }
-        // Queue the slower AI Chart Vision confirmation instead of running it
-        // inline -- this keeps the fast math-only tick fast and safely inside
-        // Vercel's 10-second limit. A separate scheduled job (api/vision-worker)
-        // picks this up and sends a follow-up Telegram message with the
-        // hedge-fund-style explanation once it's done.
-        try {
-          await pushPendingVision({
-            symbol: symLabel, mode: mode, price: price, dailyCandlesForChart: dailyCandlesForChart,
-            direction: result.direction, stopPrice: result.stopPrice,
-            targetPrice: result.target ? result.target.price : null,
-            queuedAt: Date.now()
-          });
-        } catch (e) { entry[mode + 'VisionQueueError'] = e.message; }
       }
     }
   }
